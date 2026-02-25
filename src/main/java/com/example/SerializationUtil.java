@@ -1,5 +1,7 @@
 package com.example;
 
+import java.io.BufferedInputStream;
+import java.io.BufferedOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.ObjectInputStream;
@@ -19,14 +21,15 @@ public class SerializationUtil {
     }
 
     public static void serialize(Object obj, Path path, boolean compress) throws IOException {
-        try (OutputStream file = Files.newOutputStream(path)) {
+        try (OutputStream file = Files.newOutputStream(path);
+             BufferedOutputStream buf = new BufferedOutputStream(file)) {
             if (compress) {
-                try (GZIPOutputStream gzip = new GZIPOutputStream(file);
+                try (GZIPOutputStream gzip = new GZIPOutputStream(buf);
                      ObjectOutputStream oos = new ObjectOutputStream(gzip)) {
                     oos.writeObject(obj);
                 }
             } else {
-                try (ObjectOutputStream oos = new ObjectOutputStream(file)) {
+                try (ObjectOutputStream oos = new ObjectOutputStream(buf)) {
                     oos.writeObject(obj);
                 }
             }
@@ -56,14 +59,15 @@ public class SerializationUtil {
      */
     @SuppressWarnings("unchecked")
     public static <T> T deserialize(Path path, boolean compress) throws IOException, ClassNotFoundException {
-        try (InputStream file = Files.newInputStream(path)) {
+        try (InputStream file = Files.newInputStream(path);
+             BufferedInputStream buf = new BufferedInputStream(file)) {
             if (compress) {
-                try (GZIPInputStream gzip = new GZIPInputStream(file);
+                try (GZIPInputStream gzip = new GZIPInputStream(buf);
                      ObjectInputStream ois = new ObjectInputStream(gzip)) {
                     return (T) ois.readObject();
                 }
             } else {
-                try (ObjectInputStream ois = new ObjectInputStream(file)) {
+                try (ObjectInputStream ois = new ObjectInputStream(buf)) {
                     return (T) ois.readObject();
                 }
             }
