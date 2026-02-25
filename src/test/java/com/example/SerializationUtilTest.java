@@ -54,10 +54,17 @@ class SerializationUtilTest {
     }
 
     @Test
-    void deserializeWrongCompressionFlagThrows() throws Exception {
+    void deserializePlainAsCompressedThrows() throws Exception {
         Path file = tempDir.resolve("plain.ser");
         SerializationUtil.serialize("data", file, false);
         assertThrows(IOException.class, () -> SerializationUtil.deserialize(file, true));
+    }
+
+    @Test
+    void deserializeCompressedAsPlainThrows() throws Exception {
+        Path file = tempDir.resolve("compressed.ser.gz");
+        SerializationUtil.serialize("data", file, true);
+        assertThrows(IOException.class, () -> SerializationUtil.deserialize(file, false));
     }
 
     @Test
@@ -66,5 +73,21 @@ class SerializationUtilTest {
         Object notSerializable = new Object() {};
         assertThrows(NotSerializableException.class,
                 () -> SerializationUtil.serialize(notSerializable, file));
+    }
+
+    @Test
+    void deserializeNonExistentFileThrows() {
+        Path file = tempDir.resolve("missing.ser");
+        assertThrows(IOException.class, () -> SerializationUtil.deserialize(file));
+    }
+
+    @Test
+    void wrongTypeThrowsClassCastException() throws Exception {
+        Path file = tempDir.resolve("int.ser");
+        SerializationUtil.serialize(42, file);
+        assertThrows(ClassCastException.class, () -> {
+            String result = SerializationUtil.deserialize(file);
+            result.length(); // trigger cast
+        });
     }
 }
