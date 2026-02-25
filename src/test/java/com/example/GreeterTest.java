@@ -23,7 +23,37 @@ class GreeterTest {
     }
 
     @Test
+    void greetWithWhitespaceNameThrows() {
+        assertThrows(IllegalArgumentException.class, () -> greeter.greet("   "));
+    }
+
+    @Test
     void greetWithNullThrows() {
         assertThrows(IllegalArgumentException.class, () -> greeter.greet(null));
+    }
+
+    @Test
+    void farewellWithName() {
+        assertEquals("Goodbye, Alice!", greeter.farewell("Alice"));
+    }
+
+    @Test
+    void farewellWithWorld() {
+        assertEquals("Goodbye, World!", greeter.farewell("World"));
+    }
+
+    @Test
+    void farewellWithBlankNameThrows() {
+        assertThrows(IllegalArgumentException.class, () -> greeter.farewell(""));
+    }
+
+    @Test
+    void farewellWithWhitespaceNameThrows() {
+        assertThrows(IllegalArgumentException.class, () -> greeter.farewell("   "));
+    }
+
+    @Test
+    void farewellWithNullThrows() {
+        assertThrows(IllegalArgumentException.class, () -> greeter.farewell(null));
     }
 }
