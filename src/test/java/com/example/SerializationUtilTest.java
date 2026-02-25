@@ -5,6 +5,7 @@ import org.junit.jupiter.api.io.TempDir;
 
 import java.io.IOException;
 import java.io.NotSerializableException;
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.List;
 
@@ -27,8 +28,20 @@ class SerializationUtilTest {
     void serializeAndDeserializeWithCompression() throws Exception {
         Path file = tempDir.resolve("test.ser.gz");
         SerializationUtil.serialize("hello world", file, true);
-        String result = SerializationUtil.deserialize(file, true);
+        String result = SerializationUtil.deserialize(file);
         assertEquals("hello world", result);
+    }
+
+    @Test
+    void autoDetectsBothFormatsFromSameDeserializeMethod() throws Exception {
+        Path plain = tempDir.resolve("plain.ser");
+        Path compressed = tempDir.resolve("compressed.ser.gz");
+
+        SerializationUtil.serialize("plain", plain, false);
+        SerializationUtil.serialize("compressed", compressed, true);
+
+        assertEquals("plain", SerializationUtil.deserialize(plain));
+        assertEquals("compressed", SerializationUtil.deserialize(compressed));
     }
 
     @Test
@@ -54,17 +67,17 @@ class SerializationUtilTest {
     }
 
     @Test
-    void deserializePlainAsCompressedThrows() throws Exception {
-        Path file = tempDir.resolve("plain.ser");
-        SerializationUtil.serialize("data", file, false);
-        assertThrows(IOException.class, () -> SerializationUtil.deserialize(file, true));
+    void deserializeEmptyFileThrows() throws Exception {
+        Path file = tempDir.resolve("empty.ser");
+        Files.createFile(file);
+        assertThrows(IOException.class, () -> SerializationUtil.deserialize(file));
     }
 
     @Test
-    void deserializeCompressedAsPlainThrows() throws Exception {
-        Path file = tempDir.resolve("compressed.ser.gz");
-        SerializationUtil.serialize("data", file, true);
-        assertThrows(IOException.class, () -> SerializationUtil.deserialize(file, false));
+    void deserializeUnknownMagicByteThrows() throws Exception {
+        Path file = tempDir.resolve("unknown.ser");
+        Files.write(file, new byte[]{0x42});
+        assertThrows(IOException.class, () -> SerializationUtil.deserialize(file));
     }
 
     @Test

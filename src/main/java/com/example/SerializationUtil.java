@@ -14,6 +14,9 @@ import java.util.zip.GZIPOutputStream;
 
 public class SerializationUtil {
 
+    private static final byte MAGIC_PLAIN = 0x00;
+    private static final byte MAGIC_GZIP  = 0x01;
+
     private SerializationUtil() {}
 
     public static void serialize(Object obj, Path path) throws IOException {
@@ -23,6 +26,7 @@ public class SerializationUtil {
     public static void serialize(Object obj, Path path, boolean compress) throws IOException {
         try (OutputStream file = Files.newOutputStream(path);
              BufferedOutputStream buf = new BufferedOutputStream(file)) {
+            buf.write(compress ? MAGIC_GZIP : MAGIC_PLAIN);
             if (compress) {
                 try (GZIPOutputStream gzip = new GZIPOutputStream(buf);
                      ObjectOutputStream oos = new ObjectOutputStream(gzip)) {
@@ -39,6 +43,9 @@ public class SerializationUtil {
     /**
      * Deserializes an object from the given path.
      *
+     * <p>The compression format is detected automatically from the first byte written
+     * by {@link #serialize(Object, Path, boolean)}.
+     *
      * <p><strong>Security warning:</strong> Java native deserialization is a known
      * remote-code-execution vector. Only deserialize data from fully trusted sources.
      * Consider using {@link ObjectInputStream#setObjectInputFilter} or switching to
@@ -49,27 +56,23 @@ public class SerializationUtil {
      */
     @SuppressWarnings("unchecked")
     public static <T> T deserialize(Path path) throws IOException, ClassNotFoundException {
-        return deserialize(path, false);
-    }
-
-    /**
-     * Deserializes an object from the given path, optionally decompressing with GZIP.
-     *
-     * @see #deserialize(Path)
-     */
-    @SuppressWarnings("unchecked")
-    public static <T> T deserialize(Path path, boolean compress) throws IOException, ClassNotFoundException {
         try (InputStream file = Files.newInputStream(path);
              BufferedInputStream buf = new BufferedInputStream(file)) {
-            if (compress) {
+            int magic = buf.read();
+            if (magic == -1) {
+                throw new IOException("File is empty: " + path);
+            }
+            if (magic == MAGIC_GZIP) {
                 try (GZIPInputStream gzip = new GZIPInputStream(buf);
                      ObjectInputStream ois = new ObjectInputStream(gzip)) {
                     return (T) ois.readObject();
                 }
-            } else {
+            } else if (magic == MAGIC_PLAIN) {
                 try (ObjectInputStream ois = new ObjectInputStream(buf)) {
                     return (T) ois.readObject();
                 }
+            } else {
+                throw new IOException("Unknown format byte 0x" + Integer.toHexString(magic) + " in: " + path);
             }
         }
     }
