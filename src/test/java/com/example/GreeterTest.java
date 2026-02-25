@@ -26,4 +26,19 @@ class GreeterTest {
     void greetWithNullThrows() {
         assertThrows(IllegalArgumentException.class, () -> greeter.greet(null));
     }
+
+    @Test
+    void farewellWithName() {
+        assertEquals("Goodbye, Alice!", greeter.farewell("Alice"));
+    }
+
+    @Test
+    void farewellWithBlankNameThrows() {
+        assertThrows(IllegalArgumentException.class, () -> greeter.farewell(""));
+    }
+
+    @Test
+    void farewellWithNullThrows() {
+        assertThrows(IllegalArgumentException.class, () -> greeter.farewell(null));
+    }
 }
