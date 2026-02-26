@@ -1,0 +1,63 @@
+name: Claude Issue Agent
+
+on:
+  issues:
+    types: [labeled]
+  issue_comment:
+    types: [created]
+
+jobs:
+  claude-agent:
+    # Spustí se při labelu "claude" nebo @claude zmínce v komentáři issue (ne PR)
+    if: |
+      (github.event_name == 'issues' && github.event.label.name == 'claude') ||
+      (github.event_name == 'issue_comment' &&
+       github.event.issue.pull_request == null &&
+       contains(github.event.comment.body, '@claude'))
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      issues: write
+      pull-requests: write
+      id-token: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Run Claude Agent
+        uses: anthropics/claude-code-action@v1
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          prompt: |
+            You are working on a Java 17 project (Gradle build, JUnit Jupiter 5.10).
+            Key files: src/main/java/com/example/SerializationUtil.java, src/test/java/com/example/SerializationUtilTest.java
+
+            GitHub issue #${{ github.event.issue.number }}: ${{ github.event.issue.title }}
+
+            Issue description:
+            ${{ github.event.issue.body }}
+
+            ${{ github.event_name == 'issue_comment' && format('Specific request in comment: {0}', github.event.comment.body) || '' }}
+
+            Your task:
+            1. Understand the issue and implement the requested changes.
+            2. Create a branch named `issue-${{ github.event.issue.number }}` from main.
+            3. Make all necessary code changes.
+            4. Verify with `./gradlew test` — all tests must pass.
+            5. Push the branch and open a pull request referencing `Closes #${{ github.event.issue.number }}`.
+            6. Post a comment on the issue summarising what you did and linking the PR.
+          claude_args: >-
+            --model claude-sonnet-4-6
+            --allowedTools "Bash(git *),Bash(gh *),Bash(./gradlew *),Read,Write,Edit,Glob,Grep"
