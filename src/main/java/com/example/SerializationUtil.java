@@ -1,5 +1,7 @@
 package com.example;
 
+import org.apache.commons.compress.compressors.bzip2.BZip2CompressorInputStream;
+import org.apache.commons.compress.compressors.bzip2.BZip2CompressorOutputStream;
 import org.tukaani.xz.LZMA2Options;
 import org.tukaani.xz.XZInputStream;
 import org.tukaani.xz.XZOutputStream;
@@ -23,11 +25,12 @@ public class SerializationUtil {
     private static final int MAGIC_PLAIN = 0x00;
     private static final int MAGIC_GZIP  = 0x01;
     private static final int MAGIC_XZ    = 0x02;
+    private static final int MAGIC_BZIP2 = 0x03;
+
+    private static final Compression[] AUTO_CODECS = { Compression.GZIP, Compression.XZ, Compression.BZIP2 };
 
     /** Supported compression codecs. */
-    public enum Compression {
-        NONE, GZIP, XZ
-    }
+    public enum Compression { NONE, GZIP, XZ, BZIP2 }
 
     private SerializationUtil() {}
 
@@ -39,10 +42,11 @@ public class SerializationUtil {
     /**
      * Serializes {@code obj} to {@code path}.
      *
-     * <p>When {@code compress} is {@code true}, all available compression codecs
-     * (GZIP, XZ) are tried in memory and the one producing the smallest output is used.
-     * The chosen codec is recorded in the magic byte so that {@link #deserialize(Path)}
-     * can detect it automatically.
+     * <p>When {@code compress} is {@code true}, the object is serialized once into a byte
+     * array. Each codec is then measured by piping those bytes through a
+     * {@link CountingOutputStream} — the compressed output is counted but never retained,
+     * so no additional large buffers are allocated. The winning codec writes the final
+     * file in a single streaming pass over the already-held raw bytes.
      *
      * <p>When {@code compress} is {@code false}, no compression is applied.
      */
@@ -51,37 +55,47 @@ public class SerializationUtil {
             serialize(obj, path, Compression.NONE);
             return;
         }
-        byte[] raw     = toBytes(obj);
-        byte[] gzipped = compress(raw, Compression.GZIP);
-        byte[] xzed    = compress(raw, Compression.XZ);
-        if (gzipped.length <= xzed.length) {
-            writeToFile(path, MAGIC_GZIP, gzipped);
-        } else {
-            writeToFile(path, MAGIC_XZ, xzed);
+        byte[] raw = toBytes(obj);
+
+        Compression best = AUTO_CODECS[0];
+        long bestSize = countCompressed(raw, best);
+        for (int i = 1; i < AUTO_CODECS.length; i++) {
+            long size = countCompressed(raw, AUTO_CODECS[i]);
+            if (size < bestSize) {
+                best     = AUTO_CODECS[i];
+                bestSize = size;
+            }
         }
+
+        writeCompressed(path, raw, best);
     }
 
     /**
      * Serializes {@code obj} to {@code path} using the specified compression {@code codec}.
-     * The codec is recorded in the magic byte so that {@link #deserialize(Path)}
-     * can detect it automatically.
+     * Data is streamed directly to the file — the object is never fully buffered in memory.
      */
     public static void serialize(Object obj, Path path, Compression codec) throws IOException {
-        byte[] raw = toBytes(obj);
-        if (codec == Compression.NONE) {
-            writeToFile(path, MAGIC_PLAIN, raw);
-        } else {
-            byte[] compressed = compress(raw, codec);
-            int magic = (codec == Compression.GZIP) ? MAGIC_GZIP : MAGIC_XZ;
-            writeToFile(path, magic, compressed);
+        try (OutputStream file = Files.newOutputStream(path);
+             BufferedOutputStream buf = new BufferedOutputStream(file)) {
+            buf.write(magicFor(codec));
+            if (codec == Compression.NONE) {
+                try (ObjectOutputStream oos = new ObjectOutputStream(buf)) {
+                    oos.writeObject(obj);
+                }
+            } else {
+                try (OutputStream compressed = openCompressor(buf, codec);
+                     ObjectOutputStream oos = new ObjectOutputStream(compressed)) {
+                    oos.writeObject(obj);
+                }
+            }
         }
     }
 
     /**
      * Deserializes an object from the given path.
      *
-     * <p>The compression format is detected automatically from the magic byte written
-     * by any of the {@code serialize} overloads (0x00 = none, 0x01 = GZIP, 0x02 = XZ).
+     * <p>The compression format is detected automatically from the magic byte:
+     * 0x00 = none, 0x01 = GZIP, 0x02 = XZ, 0x03 = BZip2.
      *
      * <p><strong>Security warning:</strong> Java native deserialization is a known
      * remote-code-execution vector. Only deserialize data from fully trusted sources.
@@ -113,11 +127,18 @@ public class SerializationUtil {
                      ObjectInputStream ois = new ObjectInputStream(xz)) {
                     return (T) ois.readObject();
                 }
+            } else if (magic == MAGIC_BZIP2) {
+                try (BZip2CompressorInputStream bzip2 = new BZip2CompressorInputStream(buf);
+                     ObjectInputStream ois = new ObjectInputStream(bzip2)) {
+                    return (T) ois.readObject();
+                }
             } else {
                 throw new IOException("Unknown format byte 0x" + Integer.toHexString(magic) + " in: " + path);
             }
         }
     }
+
+    // --- private helpers ---
 
     private static byte[] toBytes(Object obj) throws IOException {
         ByteArrayOutputStream baos = new ByteArrayOutputStream();
@@ -127,29 +148,54 @@ public class SerializationUtil {
         return baos.toByteArray();
     }
 
-    private static byte[] compress(byte[] data, Compression codec) throws IOException {
-        ByteArrayOutputStream baos = new ByteArrayOutputStream();
-        switch (codec) {
-            case GZIP -> {
-                try (GZIPOutputStream gzip = new GZIPOutputStream(baos)) {
-                    gzip.write(data);
-                }
-            }
-            case XZ -> {
-                try (XZOutputStream xz = new XZOutputStream(baos, new LZMA2Options())) {
-                    xz.write(data);
-                }
-            }
-            default -> throw new IllegalArgumentException("Cannot compress with codec: " + codec);
+    /**
+     * Compresses {@code data} through a {@link CountingOutputStream} and returns
+     * the byte count. No compressed output is retained — only the size is measured.
+     */
+    private static long countCompressed(byte[] data, Compression codec) throws IOException {
+        CountingOutputStream counter = new CountingOutputStream();
+        try (OutputStream compressor = openCompressor(counter, codec)) {
+            compressor.write(data);
         }
-        return baos.toByteArray();
+        return counter.getCount();
     }
 
-    private static void writeToFile(Path path, int magic, byte[] data) throws IOException {
+    private static void writeCompressed(Path path, byte[] raw, Compression codec) throws IOException {
         try (OutputStream file = Files.newOutputStream(path);
              BufferedOutputStream buf = new BufferedOutputStream(file)) {
-            buf.write(magic);
-            buf.write(data);
+            buf.write(magicFor(codec));
+            try (OutputStream compressed = openCompressor(buf, codec)) {
+                compressed.write(raw);
+            }
         }
+    }
+
+    private static OutputStream openCompressor(OutputStream out, Compression codec) throws IOException {
+        return switch (codec) {
+            case GZIP  -> new GZIPOutputStream(out);
+            case XZ    -> new XZOutputStream(out, new LZMA2Options());
+            case BZIP2 -> new BZip2CompressorOutputStream(out);
+            case NONE  -> throw new IllegalArgumentException("Cannot use NONE codec for compression");
+        };
+    }
+
+    private static int magicFor(Compression codec) {
+        return switch (codec) {
+            case NONE  -> MAGIC_PLAIN;
+            case GZIP  -> MAGIC_GZIP;
+            case XZ    -> MAGIC_XZ;
+            case BZIP2 -> MAGIC_BZIP2;
+        };
+    }
+
+    /** Counts bytes written to it; discards all data. */
+    private static final class CountingOutputStream extends OutputStream {
+        private long count;
+
+        @Override public void write(int b)                      { count++; }
+        @Override public void write(byte[] b, int off, int len) { count += len; }
+        @Override public void write(byte[] b)                   { count += b.length; }
+
+        long getCount() { return count; }
     }
 }
