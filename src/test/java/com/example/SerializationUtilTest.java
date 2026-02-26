@@ -3,11 +3,21 @@ package com.example;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
+import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.NotSerializableException;
+import java.io.ObjectOutputStream;
+import java.io.OutputStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.List;
+import java.util.zip.Deflater;
+import java.util.zip.DeflaterOutputStream;
+import java.util.zip.GZIPOutputStream;
+
+import org.apache.commons.compress.compressors.bzip2.BZip2CompressorOutputStream;
+import org.tukaani.xz.LZMA2Options;
+import org.tukaani.xz.XZOutputStream;
 
 import static org.junit.jupiter.api.Assertions.*;
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
@@ -218,5 +228,54 @@ class SerializationUtilTest {
 
         // Must also deserialize correctly
         assertArrayEquals(data, (byte[]) SerializationUtil.deserialize(auto));
+    }
+
+    @Test
+    void codecPlusHuffmanCombinationsRoundTrip() throws Exception {
+        // Explicitly exercises the 0x11 (GZIP+Huffman), 0x12 (XZ+Huffman), 0x13 (BZip2+Huffman)
+        // deserialization branches by manually writing files in those formats.
+        String payload = "codec+huffman round-trip";
+
+        int[] magics = {0x11, 0x12, 0x13};
+        for (int magic : magics) {
+            Path file = tempDir.resolve("combo_" + magic + ".ser");
+
+            // Serialize payload to raw bytes
+            ByteArrayOutputStream rawBuf = new ByteArrayOutputStream();
+            try (ObjectOutputStream oos = new ObjectOutputStream(rawBuf)) {
+                oos.writeObject(payload);
+            }
+            byte[] raw = rawBuf.toByteArray();
+
+            // Write: magic | Huffman( BaseCodec( raw ) )
+            try (OutputStream out = Files.newOutputStream(file)) {
+                out.write(magic);
+                Deflater def = new Deflater(Deflater.DEFAULT_COMPRESSION, true);
+                def.setStrategy(Deflater.HUFFMAN_ONLY);
+                try (DeflaterOutputStream huffman = new DeflaterOutputStream(out, def) {
+                    @Override public void close() throws IOException {
+                        try { super.close(); } finally { def.end(); }
+                    }
+                }) {
+                    try (OutputStream baseCodec = openBaseCodec(magic, huffman)) {
+                        baseCodec.write(raw);
+                    }
+                }
+            }
+
+            assertEquals(0xFF & Files.readAllBytes(file)[0], magic,
+                    "Wrong magic byte for combo 0x" + Integer.toHexString(magic));
+            assertEquals(payload, SerializationUtil.deserialize(file),
+                    "Deserialization failed for combo 0x" + Integer.toHexString(magic));
+        }
+    }
+
+    private static OutputStream openBaseCodec(int magic, OutputStream out) throws IOException {
+        return switch (magic) {
+            case 0x11 -> new GZIPOutputStream(out);
+            case 0x12 -> new XZOutputStream(out, new LZMA2Options());
+            case 0x13 -> new BZip2CompressorOutputStream(out);
+            default   -> throw new IllegalArgumentException("Unknown combo magic: 0x" + Integer.toHexString(magic));
+        };
     }
 }
