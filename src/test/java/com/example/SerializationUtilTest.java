@@ -3,6 +3,7 @@ package com.example;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
+import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.NotSerializableException;
@@ -381,5 +382,41 @@ class SerializationUtilTest {
 
         SerializationUtil.serialize(new byte[]{0x01, 0x02}, file, SerializationUtil.Compression.RLE);
         assertArrayEquals(new byte[]{0x01, 0x02}, SerializationUtil.deserialize(file));
+    }
+
+    @Test
+    void rleOutputStreamRejectsInvalidBounds() throws Exception {
+        byte[] data = new byte[10];
+        try (RleOutputStream rle = new RleOutputStream(new ByteArrayOutputStream())) {
+            assertThrows(IndexOutOfBoundsException.class, () -> rle.write(data, -1, 5));
+            assertThrows(IndexOutOfBoundsException.class, () -> rle.write(data, 0, -1));
+            assertThrows(IndexOutOfBoundsException.class, () -> rle.write(data, 0, 11));
+        }
+    }
+
+    @Test
+    void rleInputStreamRejectsInvalidBounds() throws Exception {
+        byte[] encoded = {3, 0x42}; // run: count=3, byte=0x42
+        try (RleInputStream rle = new RleInputStream(new ByteArrayInputStream(encoded))) {
+            byte[] buf = new byte[10];
+            assertThrows(IndexOutOfBoundsException.class, () -> rle.read(buf, -1, 5));
+            assertThrows(IndexOutOfBoundsException.class, () -> rle.read(buf, 0, -1));
+            assertThrows(IndexOutOfBoundsException.class, () -> rle.read(buf, 0, 11));
+        }
+    }
+
+    @Test
+    void rleOutputStreamFlushEmitsBufferedRun() throws Exception {
+        ByteArrayOutputStream baos = new ByteArrayOutputStream();
+        RleOutputStream rle = new RleOutputStream(baos);
+        rle.write(new byte[]{0x42, 0x42, 0x42}, 0, 3);
+        rle.flush();
+        assertTrue(baos.size() > 0, "flush() should emit the buffered run to the underlying stream");
+        rle.close();
+        // Full round-trip: the flushed run must decode back to the original bytes
+        byte[] decoded = new byte[3];
+        int n = new RleInputStream(new ByteArrayInputStream(baos.toByteArray())).read(decoded, 0, 3);
+        assertEquals(3, n);
+        assertArrayEquals(new byte[]{0x42, 0x42, 0x42}, decoded);
     }
 }
