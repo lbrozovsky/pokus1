@@ -8,7 +8,6 @@ import org.tukaani.xz.XZOutputStream;
 
 import java.io.BufferedInputStream;
 import java.io.BufferedOutputStream;
-import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.ObjectInputStream;
@@ -78,11 +77,12 @@ public class SerializationUtil {
     /**
      * Serializes {@code obj} to {@code path}.
      *
-     * <p>When {@code compress} is {@code true}, the object is serialized once into a byte
-     * array. Every codec+Huffman combination is then measured by piping those bytes through a
-     * {@link CountingOutputStream} — the compressed output is counted but never retained,
-     * so no additional large buffers are allocated. The winning format writes the final
-     * file in a single streaming pass over the already-held raw bytes.
+     * <p>When {@code compress} is {@code true}, every codec+Huffman combination is measured
+     * by serializing the object directly through a {@link CountingOutputStream} — the
+     * compressed output is counted but never retained, so no additional large buffers are
+     * allocated. The winning format then writes the final file in a single streaming pass,
+     * again without buffering the serialized bytes. The object is never copied into a
+     * separate {@code byte[]}.
      *
      * <p>When {@code compress} is {@code false}, no compression is applied.
      */
@@ -91,19 +91,18 @@ public class SerializationUtil {
             serialize(obj, path, Compression.NONE);
             return;
         }
-        byte[] raw = toBytes(obj);
 
         Format best = AUTO_FORMATS[0];
-        long bestSize = countCompressed(raw, best);
+        long bestSize = countCompressed(obj, best);
         for (int i = 1; i < AUTO_FORMATS.length; i++) {
-            long size = countCompressed(raw, AUTO_FORMATS[i]);
+            long size = countCompressed(obj, AUTO_FORMATS[i]);
             if (size < bestSize) {
                 best     = AUTO_FORMATS[i];
                 bestSize = size;
             }
         }
 
-        writeCompressed(path, raw, best);
+        writeCompressed(path, obj, best);
     }
 
     /**
@@ -222,32 +221,26 @@ public class SerializationUtil {
 
     // --- private helpers ---
 
-    private static byte[] toBytes(Object obj) throws IOException {
-        ByteArrayOutputStream baos = new ByteArrayOutputStream();
-        try (ObjectOutputStream oos = new ObjectOutputStream(baos)) {
-            oos.writeObject(obj);
-        }
-        return baos.toByteArray();
-    }
-
     /**
-     * Compresses {@code data} through a {@link CountingOutputStream} and returns
-     * the byte count. No compressed output is retained — only the size is measured.
+     * Serializes {@code obj} through a {@link CountingOutputStream} and returns
+     * the compressed byte count. No compressed output is retained — only the size is measured.
      */
-    private static long countCompressed(byte[] data, Format fmt) throws IOException {
+    private static long countCompressed(Object obj, Format fmt) throws IOException {
         CountingOutputStream counter = new CountingOutputStream();
-        try (OutputStream compressor = openFormatCompressor(counter, fmt)) {
-            compressor.write(data);
+        try (OutputStream compressor = openFormatCompressor(counter, fmt);
+             ObjectOutputStream oos = new ObjectOutputStream(compressor)) {
+            oos.writeObject(obj);
         }
         return counter.getCount();
     }
 
-    private static void writeCompressed(Path path, byte[] raw, Format fmt) throws IOException {
+    private static void writeCompressed(Path path, Object obj, Format fmt) throws IOException {
         try (OutputStream file = Files.newOutputStream(path);
              BufferedOutputStream buf = new BufferedOutputStream(file)) {
             buf.write(magicFor(fmt));
-            try (OutputStream compressor = openFormatCompressor(buf, fmt)) {
-                compressor.write(raw);
+            try (OutputStream compressor = openFormatCompressor(buf, fmt);
+                 ObjectOutputStream oos = new ObjectOutputStream(compressor)) {
+                oos.writeObject(obj);
             }
         }
     }
