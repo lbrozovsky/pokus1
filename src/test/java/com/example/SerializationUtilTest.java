@@ -10,6 +10,7 @@ import java.io.ObjectOutputStream;
 import java.io.OutputStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.Arrays;
 import java.util.List;
 import java.util.zip.Deflater;
 import java.util.zip.DeflaterOutputStream;
@@ -197,7 +198,7 @@ class SerializationUtilTest {
         SerializationUtil.serialize(data, file, true);
 
         int magic = Files.readAllBytes(file)[0] & 0xFF;
-        // Valid magic bytes: plain codecs (0x01–0x05) or codec+Huffman variants (0x11–0x15)
+        // Valid magic bytes: plain codecs (0x01–0x05) or codec+Huffman variants (0x11, 0x12, 0x13, 0x15; 0x14 unused)
         assertTrue(magic == 0x01 || magic == 0x02 || magic == 0x03 || magic == 0x04
                         || magic == 0x05
                         || magic == 0x11 || magic == 0x12 || magic == 0x13 || magic == 0x15,
@@ -208,24 +209,27 @@ class SerializationUtilTest {
     void autoCompressionPicksSmallestCodec() throws Exception {
         // 100K zeros are highly compressible — auto should match or beat every individual codec
         byte[] data = new byte[100_000];
-        Path auto   = tempDir.resolve("auto.ser");
-        Path gzip   = tempDir.resolve("gzip.ser");
-        Path xz     = tempDir.resolve("xz.ser");
-        Path bzip2  = tempDir.resolve("bzip2.ser");
+        Path auto    = tempDir.resolve("auto.ser");
+        Path gzip    = tempDir.resolve("gzip.ser");
+        Path xz      = tempDir.resolve("xz.ser");
+        Path bzip2   = tempDir.resolve("bzip2.ser");
         Path huffman = tempDir.resolve("huffman.ser");
+        Path rle     = tempDir.resolve("rle.ser");
 
         SerializationUtil.serialize(data, auto,    true);
         SerializationUtil.serialize(data, gzip,    SerializationUtil.Compression.GZIP);
         SerializationUtil.serialize(data, xz,      SerializationUtil.Compression.XZ);
         SerializationUtil.serialize(data, bzip2,   SerializationUtil.Compression.BZIP2);
         SerializationUtil.serialize(data, huffman, SerializationUtil.Compression.HUFFMAN);
+        SerializationUtil.serialize(data, rle,     SerializationUtil.Compression.RLE);
 
         long autoSize = Files.size(auto);
-        // Auto selects from all 7 combinations, so its result must be <= every individual codec
-        assertTrue(autoSize <= Files.size(gzip),   "Auto should be no larger than GZIP");
-        assertTrue(autoSize <= Files.size(xz),     "Auto should be no larger than XZ");
-        assertTrue(autoSize <= Files.size(bzip2),  "Auto should be no larger than BZip2");
+        // Auto selects from all 9 formats, so its result must be <= every individual codec
+        assertTrue(autoSize <= Files.size(gzip),    "Auto should be no larger than GZIP");
+        assertTrue(autoSize <= Files.size(xz),      "Auto should be no larger than XZ");
+        assertTrue(autoSize <= Files.size(bzip2),   "Auto should be no larger than BZip2");
         assertTrue(autoSize <= Files.size(huffman), "Auto should be no larger than Huffman");
+        assertTrue(autoSize <= Files.size(rle),     "Auto should be no larger than RLE");
 
         // Must also deserialize correctly
         assertArrayEquals(data, (byte[]) SerializationUtil.deserialize(auto));
@@ -303,12 +307,12 @@ class SerializationUtilTest {
 
     @Test
     void rleHuffmanCombinationRoundTrip() throws Exception {
-        // Exercises the 0x15 (RLE+Huffman) branch via the public API
+        // Constructs a synthetic 0x15 (RLE+Huffman) payload to exercise the deserialization branch.
         String payload = "rle+huffman round-trip test";
         Path file = tempDir.resolve("rle_huffman.ser");
 
-        // Serialize using auto-selection so RLE+Huffman can be selected, or use direct format.
-        // We exercise the deserialization path by writing 0x15 manually here.
+        // There is no public API to request the RLE+Huffman format; this test writes the 0x15
+        // header and encoded body manually to cover the corresponding deserialization path.
         ByteArrayOutputStream rawBuf = new ByteArrayOutputStream();
         try (ObjectOutputStream oos = new ObjectOutputStream(rawBuf)) {
             oos.writeObject(payload);
@@ -325,7 +329,7 @@ class SerializationUtilTest {
                     try { super.close(); } finally { def.end(); }
                 }
             }) {
-                try (OutputStream rleOut = new RleOutputStreamForTest(huffman)) {
+                try (OutputStream rleOut = new RleOutputStream(huffman)) {
                     rleOut.write(raw);
                 }
             }
@@ -345,34 +349,37 @@ class SerializationUtilTest {
         };
     }
 
-    /** Minimal RLE encoder duplicated in tests to avoid accessing package-private inner class. */
-    private static final class RleOutputStreamForTest extends java.io.FilterOutputStream {
-        private int lastByte = -1;
-        private int count    = 0;
+    @Test
+    void rleHandlesRunsLongerThan255Bytes() throws Exception {
+        // RLE has a 255-byte limit per run; a 300-byte run must be split into two consecutive runs
+        byte[] data = new byte[300];
+        Arrays.fill(data, (byte) 0xFF);
+        Path file = tempDir.resolve("rle_long_run.ser");
+        SerializationUtil.serialize(data, file, SerializationUtil.Compression.RLE);
+        assertArrayEquals(data, SerializationUtil.deserialize(file));
+    }
 
-        RleOutputStreamForTest(OutputStream out) { super(out); }
+    @Test
+    void rleRoundTripWithAlternatingBytes() throws Exception {
+        // Alternating bytes are worst-case for RLE: every byte becomes a separate (count=1, byte) pair
+        byte[] data = new byte[1000];
+        for (int i = 0; i < data.length; i++) data[i] = (byte) (i % 2 == 0 ? 0x00 : 0x01);
+        Path file = tempDir.resolve("rle_alternating.ser");
+        SerializationUtil.serialize(data, file, SerializationUtil.Compression.RLE);
+        assertArrayEquals(data, SerializationUtil.deserialize(file));
+    }
 
-        @Override
-        public void write(int b) throws IOException {
-            b &= 0xFF;
-            if (b == lastByte && count < 255) {
-                count++;
-            } else {
-                if (count > 0) { out.write(count); out.write(lastByte); count = 0; }
-                lastByte = b;
-                count    = 1;
-            }
-        }
+    @Test
+    void rleRoundTripBoundaryCases() throws Exception {
+        Path file = tempDir.resolve("rle_boundary.ser");
 
-        @Override
-        public void write(byte[] b, int off, int len) throws IOException {
-            for (int i = 0; i < len; i++) write(b[off + i] & 0xFF);
-        }
+        SerializationUtil.serialize(new byte[]{0x42}, file, SerializationUtil.Compression.RLE);
+        assertArrayEquals(new byte[]{0x42}, SerializationUtil.deserialize(file));
 
-        @Override
-        public void close() throws IOException {
-            if (count > 0) { out.write(count); out.write(lastByte); }
-            super.close();
-        }
+        SerializationUtil.serialize(new byte[]{0x01, 0x01}, file, SerializationUtil.Compression.RLE);
+        assertArrayEquals(new byte[]{0x01, 0x01}, SerializationUtil.deserialize(file));
+
+        SerializationUtil.serialize(new byte[]{0x01, 0x02}, file, SerializationUtil.Compression.RLE);
+        assertArrayEquals(new byte[]{0x01, 0x02}, SerializationUtil.deserialize(file));
     }
 }

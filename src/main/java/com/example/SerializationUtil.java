@@ -9,8 +9,6 @@ import org.tukaani.xz.XZOutputStream;
 import java.io.BufferedInputStream;
 import java.io.BufferedOutputStream;
 import java.io.ByteArrayOutputStream;
-import java.io.FilterInputStream;
-import java.io.FilterOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.ObjectInputStream;
@@ -29,8 +27,10 @@ public class SerializationUtil {
 
     /**
      * First byte of every serialized file — identifies the compression codec used.
-     * Magic bytes 0x11–0x15 use bit 0x10 as a Huffman post-processing flag:
-     * lower nibble = base codec (1=GZIP, 2=XZ, 3=BZIP2, 5=RLE), upper bit = Huffman applied on top.
+     * Plain magic values: 0x00 = none, 0x01 = GZIP, 0x02 = XZ, 0x03 = BZIP2, 0x04 = Huffman-only, 0x05 = RLE.
+     * Combo magic values use bit 0x10 to indicate Huffman post-processing on top of a base codec:
+     *   0x11 = GZIP+Huffman, 0x12 = XZ+Huffman, 0x13 = BZIP2+Huffman, 0x15 = RLE+Huffman.
+     * The value 0x14 is reserved and is not currently used or accepted.
      */
     private static final int MAGIC_PLAIN         = 0x00;
     private static final int MAGIC_GZIP          = 0x01;
@@ -343,82 +343,6 @@ public class SerializationUtil {
      */
     private static InputStream openRleDecompressor(InputStream in) {
         return new RleInputStream(in);
-    }
-
-    /**
-     * Streaming run-length encoder: each consecutive run of identical bytes is stored
-     * as a pair {@code (count, byte)} where {@code count} is in the range 1–255.
-     */
-    private static final class RleOutputStream extends FilterOutputStream {
-        private int lastByte = -1;
-        private int count    = 0;
-
-        RleOutputStream(OutputStream out) { super(out); }
-
-        @Override
-        public void write(int b) throws IOException {
-            b &= 0xFF;
-            if (b == lastByte && count < 255) {
-                count++;
-            } else {
-                if (count > 0) flushRun();
-                lastByte = b;
-                count    = 1;
-            }
-        }
-
-        @Override
-        public void write(byte[] b, int off, int len) throws IOException {
-            for (int i = 0; i < len; i++) write(b[off + i] & 0xFF);
-        }
-
-        @Override
-        public void close() throws IOException {
-            if (count > 0) flushRun();
-            super.close();
-        }
-
-        private void flushRun() throws IOException {
-            out.write(count);
-            out.write(lastByte);
-            count = 0;
-        }
-    }
-
-    /**
-     * Streaming run-length decoder matching {@link RleOutputStream}.
-     * Reads {@code (count, byte)} pairs and expands each pair into {@code count} copies of {@code byte}.
-     */
-    private static final class RleInputStream extends FilterInputStream {
-        private int remaining   = 0;
-        private int currentByte = -1;
-
-        RleInputStream(InputStream in) { super(in); }
-
-        @Override
-        public int read() throws IOException {
-            while (remaining == 0) {
-                int cnt = in.read();
-                if (cnt == -1) return -1;
-                currentByte = in.read();
-                if (currentByte == -1) throw new IOException("Unexpected EOF in RLE stream");
-                remaining = cnt;
-            }
-            remaining--;
-            return currentByte;
-        }
-
-        @Override
-        public int read(byte[] b, int off, int len) throws IOException {
-            int read = 0;
-            for (int i = 0; i < len; i++) {
-                int c = read();
-                if (c == -1) return read == 0 ? -1 : read;
-                b[off + i] = (byte) c;
-                read++;
-            }
-            return read;
-        }
     }
 
     /** Counts bytes written to it; discards all data. */
