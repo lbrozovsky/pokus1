@@ -197,9 +197,10 @@ class SerializationUtilTest {
         SerializationUtil.serialize(data, file, true);
 
         int magic = Files.readAllBytes(file)[0] & 0xFF;
-        // Valid magic bytes: plain codecs (0x01–0x04) or codec+Huffman variants (0x11–0x13)
+        // Valid magic bytes: plain codecs (0x01–0x05) or codec+Huffman variants (0x11–0x15)
         assertTrue(magic == 0x01 || magic == 0x02 || magic == 0x03 || magic == 0x04
-                        || magic == 0x11 || magic == 0x12 || magic == 0x13,
+                        || magic == 0x05
+                        || magic == 0x11 || magic == 0x12 || magic == 0x13 || magic == 0x15,
                 "Expected a compressed magic byte, got: 0x" + Integer.toHexString(magic));
     }
 
@@ -270,6 +271,71 @@ class SerializationUtilTest {
         }
     }
 
+    @Test
+    void serializeAndDeserializeWithRleCodec() throws Exception {
+        Path file = tempDir.resolve("test.ser.rle");
+        SerializationUtil.serialize("hello world", file, SerializationUtil.Compression.RLE);
+        String result = SerializationUtil.deserialize(file);
+        assertEquals("hello world", result);
+    }
+
+    @Test
+    void rleCodecWritesCorrectMagicByte() throws Exception {
+        Path file = tempDir.resolve("rle.ser");
+        SerializationUtil.serialize("data", file, SerializationUtil.Compression.RLE);
+        int magic = Files.readAllBytes(file)[0] & 0xFF;
+        assertEquals(0x05, magic, "Expected RLE magic byte 0x05");
+    }
+
+    @Test
+    void rleCompressedFileIsSmallerForRepetitiveData() throws Exception {
+        // A large array of identical bytes is ideal for RLE
+        byte[] data = new byte[100_000];
+        Path plain = tempDir.resolve("plain.ser");
+        Path rle   = tempDir.resolve("compressed.ser.rle");
+
+        SerializationUtil.serialize(data, plain);
+        SerializationUtil.serialize(data, rle, SerializationUtil.Compression.RLE);
+
+        assertTrue(Files.size(rle) < Files.size(plain),
+                "RLE should compress repetitive data smaller than uncompressed");
+    }
+
+    @Test
+    void rleHuffmanCombinationRoundTrip() throws Exception {
+        // Exercises the 0x15 (RLE+Huffman) branch via the public API
+        String payload = "rle+huffman round-trip test";
+        Path file = tempDir.resolve("rle_huffman.ser");
+
+        // Serialize using auto-selection so RLE+Huffman can be selected, or use direct format.
+        // We exercise the deserialization path by writing 0x15 manually here.
+        ByteArrayOutputStream rawBuf = new ByteArrayOutputStream();
+        try (ObjectOutputStream oos = new ObjectOutputStream(rawBuf)) {
+            oos.writeObject(payload);
+        }
+        byte[] raw = rawBuf.toByteArray();
+
+        // Write: 0x15 | Huffman( RLE( raw ) )
+        try (OutputStream out = Files.newOutputStream(file)) {
+            out.write(0x15);
+            Deflater def = new Deflater(Deflater.DEFAULT_COMPRESSION, true);
+            def.setStrategy(Deflater.HUFFMAN_ONLY);
+            try (DeflaterOutputStream huffman = new DeflaterOutputStream(out, def) {
+                @Override public void close() throws IOException {
+                    try { super.close(); } finally { def.end(); }
+                }
+            }) {
+                try (OutputStream rleOut = new RleOutputStreamForTest(huffman)) {
+                    rleOut.write(raw);
+                }
+            }
+        }
+
+        assertEquals(0x15, Files.readAllBytes(file)[0] & 0xFF, "Expected RLE+Huffman magic 0x15");
+        assertEquals(payload, SerializationUtil.deserialize(file),
+                "Deserialization failed for RLE+Huffman (0x15)");
+    }
+
     private static OutputStream openBaseCodec(int magic, OutputStream out) throws IOException {
         return switch (magic) {
             case 0x11 -> new GZIPOutputStream(out);
@@ -277,5 +343,36 @@ class SerializationUtilTest {
             case 0x13 -> new BZip2CompressorOutputStream(out);
             default   -> throw new IllegalArgumentException("Unknown combo magic: 0x" + Integer.toHexString(magic));
         };
+    }
+
+    /** Minimal RLE encoder duplicated in tests to avoid accessing package-private inner class. */
+    private static final class RleOutputStreamForTest extends java.io.FilterOutputStream {
+        private int lastByte = -1;
+        private int count    = 0;
+
+        RleOutputStreamForTest(OutputStream out) { super(out); }
+
+        @Override
+        public void write(int b) throws IOException {
+            b &= 0xFF;
+            if (b == lastByte && count < 255) {
+                count++;
+            } else {
+                if (count > 0) { out.write(count); out.write(lastByte); count = 0; }
+                lastByte = b;
+                count    = 1;
+            }
+        }
+
+        @Override
+        public void write(byte[] b, int off, int len) throws IOException {
+            for (int i = 0; i < len; i++) write(b[off + i] & 0xFF);
+        }
+
+        @Override
+        public void close() throws IOException {
+            if (count > 0) { out.write(count); out.write(lastByte); }
+            super.close();
+        }
     }
 }
