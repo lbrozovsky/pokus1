@@ -122,6 +122,30 @@ class SerializationUtilTest {
     }
 
     @Test
+    void serializeAndDeserializeWithExplicitBzip2Codec() throws Exception {
+        Path file = tempDir.resolve("test.ser.bz2");
+        SerializationUtil.serialize("hello world", file, SerializationUtil.Compression.BZIP2);
+        String result = SerializationUtil.deserialize(file);
+        assertEquals("hello world", result);
+    }
+
+    @Test
+    void serializeAndDeserializeWithHuffmanCodec() throws Exception {
+        Path file = tempDir.resolve("test.ser.huff");
+        SerializationUtil.serialize("hello world", file, SerializationUtil.Compression.HUFFMAN);
+        String result = SerializationUtil.deserialize(file);
+        assertEquals("hello world", result);
+    }
+
+    @Test
+    void huffmanCodecWritesCorrectMagicByte() throws Exception {
+        Path file = tempDir.resolve("huffman.ser");
+        SerializationUtil.serialize("data", file, SerializationUtil.Compression.HUFFMAN);
+        int magic = Files.readAllBytes(file)[0] & 0xFF;
+        assertEquals(0x04, magic, "Expected Huffman magic byte 0x04");
+    }
+
+    @Test
     void allCodecsRoundTripComplexObject() throws Exception {
         java.util.List<Integer> original = java.util.List.of(1, 2, 3, 4, 5);
         for (SerializationUtil.Compression codec : SerializationUtil.Compression.values()) {
@@ -130,14 +154,6 @@ class SerializationUtilTest {
             java.util.List<Integer> result = SerializationUtil.deserialize(file);
             assertEquals(original, result, "Round-trip failed for codec: " + codec);
         }
-    }
-
-    @Test
-    void serializeAndDeserializeWithExplicitBzip2Codec() throws Exception {
-        Path file = tempDir.resolve("test.ser.bz2");
-        SerializationUtil.serialize("hello world", file, SerializationUtil.Compression.BZIP2);
-        String result = SerializationUtil.deserialize(file);
-        assertEquals("hello world", result);
     }
 
     @Test
@@ -153,40 +169,6 @@ class SerializationUtilTest {
     }
 
     @Test
-    void autoCompressionWritesCompressedMagicByte() throws Exception {
-        byte[] data = new byte[100_000];
-        Path file = tempDir.resolve("auto.ser");
-        SerializationUtil.serialize(data, file, true);
-
-        byte magic = Files.readAllBytes(file)[0];
-        assertTrue(magic == 0x01 || magic == 0x02 || magic == 0x03,
-                "Expected GZIP (0x01), XZ (0x02), or BZip2 (0x03) magic byte, got: 0x"
-                        + Integer.toHexString(magic & 0xFF));
-    }
-
-    @Test
-    void autoCompressionPicksSmallestCodec() throws Exception {
-        // 100K zeros are highly compressible — auto should match the smallest individual codec
-        byte[] data = new byte[100_000];
-        Path auto  = tempDir.resolve("auto.ser");
-        Path gzip  = tempDir.resolve("gzip.ser");
-        Path xz    = tempDir.resolve("xz.ser");
-        Path bzip2 = tempDir.resolve("bzip2.ser");
-
-        SerializationUtil.serialize(data, auto,  true);
-        SerializationUtil.serialize(data, gzip,  SerializationUtil.Compression.GZIP);
-        SerializationUtil.serialize(data, xz,    SerializationUtil.Compression.XZ);
-        SerializationUtil.serialize(data, bzip2, SerializationUtil.Compression.BZIP2);
-
-        long autoSize = Files.size(auto);
-        long minSize  = Math.min(Files.size(gzip), Math.min(Files.size(xz), Files.size(bzip2)));
-        assertEquals(minSize, autoSize, "Auto-selected file should match the smallest individual codec");
-
-        // Must also deserialize correctly
-        assertArrayEquals(data, (byte[]) SerializationUtil.deserialize(auto));
-    }
-
-    @Test
     void xzCompressedFileIsSmallerForLargeData() throws Exception {
         byte[] data = new byte[100_000];
         Path plain = tempDir.resolve("plain.ser");
@@ -196,5 +178,45 @@ class SerializationUtilTest {
         SerializationUtil.serialize(data, xz, SerializationUtil.Compression.XZ);
 
         assertTrue(Files.size(xz) < Files.size(plain));
+    }
+
+    @Test
+    void autoCompressionWritesCompressedMagicByte() throws Exception {
+        byte[] data = new byte[100_000];
+        Path file = tempDir.resolve("auto.ser");
+        SerializationUtil.serialize(data, file, true);
+
+        int magic = Files.readAllBytes(file)[0] & 0xFF;
+        // Valid magic bytes: plain codecs (0x01–0x04) or codec+Huffman variants (0x11–0x13)
+        assertTrue(magic == 0x01 || magic == 0x02 || magic == 0x03 || magic == 0x04
+                        || magic == 0x11 || magic == 0x12 || magic == 0x13,
+                "Expected a compressed magic byte, got: 0x" + Integer.toHexString(magic));
+    }
+
+    @Test
+    void autoCompressionPicksSmallestCodec() throws Exception {
+        // 100K zeros are highly compressible — auto should match or beat every individual codec
+        byte[] data = new byte[100_000];
+        Path auto   = tempDir.resolve("auto.ser");
+        Path gzip   = tempDir.resolve("gzip.ser");
+        Path xz     = tempDir.resolve("xz.ser");
+        Path bzip2  = tempDir.resolve("bzip2.ser");
+        Path huffman = tempDir.resolve("huffman.ser");
+
+        SerializationUtil.serialize(data, auto,    true);
+        SerializationUtil.serialize(data, gzip,    SerializationUtil.Compression.GZIP);
+        SerializationUtil.serialize(data, xz,      SerializationUtil.Compression.XZ);
+        SerializationUtil.serialize(data, bzip2,   SerializationUtil.Compression.BZIP2);
+        SerializationUtil.serialize(data, huffman, SerializationUtil.Compression.HUFFMAN);
+
+        long autoSize = Files.size(auto);
+        // Auto selects from all 7 combinations, so its result must be <= every individual codec
+        assertTrue(autoSize <= Files.size(gzip),   "Auto should be no larger than GZIP");
+        assertTrue(autoSize <= Files.size(xz),     "Auto should be no larger than XZ");
+        assertTrue(autoSize <= Files.size(bzip2),  "Auto should be no larger than BZip2");
+        assertTrue(autoSize <= Files.size(huffman), "Auto should be no larger than Huffman");
+
+        // Must also deserialize correctly
+        assertArrayEquals(data, (byte[]) SerializationUtil.deserialize(auto));
     }
 }
