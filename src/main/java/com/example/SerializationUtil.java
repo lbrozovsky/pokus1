@@ -27,20 +27,24 @@ public class SerializationUtil {
 
     /**
      * First byte of every serialized file — identifies the compression codec used.
-     * Magic bytes 0x11–0x13 use bit 0x10 as a Huffman post-processing flag:
-     * lower nibble = base codec (1=GZIP, 2=XZ, 3=BZIP2), upper bit = Huffman applied on top.
+     * Plain magic values: 0x00 = none, 0x01 = GZIP, 0x02 = XZ, 0x03 = BZIP2, 0x04 = Huffman-only, 0x05 = RLE.
+     * Combo magic values use bit 0x10 to indicate Huffman post-processing on top of a base codec:
+     *   0x11 = GZIP+Huffman, 0x12 = XZ+Huffman, 0x13 = BZIP2+Huffman, 0x15 = RLE+Huffman.
+     * The value 0x14 is reserved and is not currently used or accepted.
      */
     private static final int MAGIC_PLAIN         = 0x00;
     private static final int MAGIC_GZIP          = 0x01;
     private static final int MAGIC_XZ            = 0x02;
     private static final int MAGIC_BZIP2         = 0x03;
     private static final int MAGIC_HUFFMAN       = 0x04;  // standalone Huffman-only
+    private static final int MAGIC_RLE           = 0x05;  // trivial run-length encoding
     private static final int MAGIC_GZIP_HUFFMAN  = 0x11;  // GZIP then Huffman post-processing
     private static final int MAGIC_XZ_HUFFMAN    = 0x12;  // XZ   then Huffman post-processing
     private static final int MAGIC_BZIP2_HUFFMAN = 0x13;  // BZip2 then Huffman post-processing
+    private static final int MAGIC_RLE_HUFFMAN   = 0x15;  // RLE  then Huffman post-processing
 
     /** Supported compression codecs. */
-    public enum Compression { NONE, GZIP, XZ, BZIP2, HUFFMAN }
+    public enum Compression { NONE, GZIP, XZ, BZIP2, HUFFMAN, RLE }
 
     /**
      * Internal pairing of a primary codec with an optional Huffman post-processing step.
@@ -57,9 +61,11 @@ public class SerializationUtil {
         new Format(Compression.XZ,      false),
         new Format(Compression.BZIP2,   false),
         new Format(Compression.HUFFMAN, false),
+        new Format(Compression.RLE,     false),
         new Format(Compression.GZIP,    true),
         new Format(Compression.XZ,      true),
         new Format(Compression.BZIP2,   true),
+        new Format(Compression.RLE,     true),
     };
 
     private SerializationUtil() {}
@@ -125,8 +131,8 @@ public class SerializationUtil {
      * Deserializes an object from the given path.
      *
      * <p>The compression format is detected automatically from the magic byte:
-     * 0x00 = none, 0x01 = GZIP, 0x02 = XZ, 0x03 = BZip2, 0x04 = Huffman,
-     * 0x11 = GZIP+Huffman, 0x12 = XZ+Huffman, 0x13 = BZip2+Huffman.
+     * 0x00 = none, 0x01 = GZIP, 0x02 = XZ, 0x03 = BZip2, 0x04 = Huffman, 0x05 = RLE,
+     * 0x11 = GZIP+Huffman, 0x12 = XZ+Huffman, 0x13 = BZip2+Huffman, 0x15 = RLE+Huffman.
      *
      * <p><strong>Security warning:</strong> Java native deserialization is a known
      * remote-code-execution vector. Only deserialize data from fully trusted sources.
@@ -174,6 +180,12 @@ public class SerializationUtil {
                         yield (T) ois.readObject();
                     }
                 }
+                case MAGIC_RLE -> {
+                    try (InputStream rle = openRleDecompressor(buf);
+                         ObjectInputStream ois = new ObjectInputStream(rle)) {
+                        yield (T) ois.readObject();
+                    }
+                }
                 case MAGIC_GZIP_HUFFMAN -> {
                     try (InputStream huffman = openHuffmanDecompressor(buf);
                          GZIPInputStream gzip = new GZIPInputStream(huffman);
@@ -192,6 +204,13 @@ public class SerializationUtil {
                     try (InputStream huffman = openHuffmanDecompressor(buf);
                          BZip2CompressorInputStream bzip2 = new BZip2CompressorInputStream(huffman);
                          ObjectInputStream ois = new ObjectInputStream(bzip2)) {
+                        yield (T) ois.readObject();
+                    }
+                }
+                case MAGIC_RLE_HUFFMAN -> {
+                    try (InputStream huffman = openHuffmanDecompressor(buf);
+                         InputStream rle = openRleDecompressor(huffman);
+                         ObjectInputStream ois = new ObjectInputStream(rle)) {
                         yield (T) ois.readObject();
                     }
                 }
@@ -257,6 +276,7 @@ public class SerializationUtil {
             case XZ      -> new XZOutputStream(out, new LZMA2Options());
             case BZIP2   -> new BZip2CompressorOutputStream(out);
             case HUFFMAN -> openHuffmanCompressor(out);
+            case RLE     -> openRleCompressor(out);
             case NONE    -> throw new IllegalArgumentException(
                     "Cannot use NONE codec for compression");
         };
@@ -295,6 +315,7 @@ public class SerializationUtil {
                 case GZIP  -> MAGIC_GZIP_HUFFMAN;
                 case XZ    -> MAGIC_XZ_HUFFMAN;
                 case BZIP2 -> MAGIC_BZIP2_HUFFMAN;
+                case RLE   -> MAGIC_RLE_HUFFMAN;
                 default    -> throw new IllegalArgumentException(
                         "Unsupported codec for CODEC+Huffman combination: " + fmt.codec());
             };
@@ -305,7 +326,23 @@ public class SerializationUtil {
             case XZ      -> MAGIC_XZ;
             case BZIP2   -> MAGIC_BZIP2;
             case HUFFMAN -> MAGIC_HUFFMAN;
+            case RLE     -> MAGIC_RLE;
         };
+    }
+
+    /**
+     * Opens a streaming run-length encoder.
+     * Each run of up to 255 identical bytes is stored as a (count, byte) pair.
+     */
+    private static OutputStream openRleCompressor(OutputStream out) {
+        return new RleOutputStream(out);
+    }
+
+    /**
+     * Opens a streaming run-length decoder matching {@link #openRleCompressor}.
+     */
+    private static InputStream openRleDecompressor(InputStream in) {
+        return new RleInputStream(in);
     }
 
     /** Counts bytes written to it; discards all data. */
