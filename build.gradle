@@ -21,6 +21,7 @@ repositories {
 
 dependencies {
     implementation 'org.tukaani:xz:1.9'
+    implementation 'org.apache.commons:commons-compress:1.26.2'
     testImplementation 'org.junit.jupiter:junit-jupiter:5.10.0'
     testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
 }
